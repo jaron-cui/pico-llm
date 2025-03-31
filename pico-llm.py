@@ -160,9 +160,12 @@ class KGramMLPSeqModel(nn.Module):
         self.num_inner_layers = num_inner_layers
         self.chunk_size = chunk_size
 
-        # fill in
-
-        self.net = None
+        self.net = nn.Sequential(
+            nn.Linear(k * vocab_size, embed_size),
+            nn.ReLU(),
+            *[nn.Sequential(nn.Linear(embed_size, embed_size), nn.ReLU()) for _ in range(num_inner_layers)],
+            nn.Linear(embed_size, vocab_size)
+        )
 
     def forward(self, tokens_seq):
         """
@@ -264,8 +267,21 @@ def monosemantic_analysis_for_token(token_id, model, enc, device="cpu", top_n=5)
 # 7. Single code path for text generation
 ################################################################################
 
-def nucleus_sampling(logits, p=0.95):
-    return torch.argmax(logits).item()
+def nucleus_sampling(logits: torch.Tensor, p=0.95):
+    dist = logits.softmax(dim=-1)
+    ranked_token_indices = dist.argsort()
+    cutoff_index, total_probability = 0, 0.0
+    while total_probability < p:
+        cutoff_index += 1
+        total_probability += dist[ranked_token_indices[cutoff_index]]
+
+    truncated_indices = ranked_token_indices[:cutoff_index]
+    truncated_logits = logits[truncated_indices]
+    truncated_dist = truncated_logits.softmax(dim=-1)
+
+    sample_from_truncated_dist = torch.multinomial(truncated_dist, 1).item()
+
+    return ranked_token_indices[sample_from_truncated_dist]
 
 
 def generate_text(model, enc, init_text, max_new_tokens=20, device="cpu",
@@ -438,7 +454,7 @@ def main():
     chunk_size = args.kgram_chunk_size
 
     embed_size = args.embed_size
-    batch_size = 16
+    batch_size = 32
     num_epochs = 3
     learning_rate = 1e-3
 
@@ -542,8 +558,8 @@ def main():
     ).to(device)
 
     models = {
-      # "kgram_mlp_seq": kgram_model,
-        "lstm_seq": lstm_model,
+      "kgram_mlp_seq": kgram_model,
+      #   "lstm_seq": lstm_model,
       # "kvcache_transformer": kv_transformer,
     }
 
