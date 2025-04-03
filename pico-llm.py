@@ -248,11 +248,33 @@ class RMSNorm(nn.Module):
         return self.weight * (x / norm)
 
 class TransformerModel(nn.Module):
-    def __init__(self, vocab_size=50257, d_model=1024, n_heads=2, n_blocks=4):
+    def __init__(self, device, vocab_size=50257, d_model=1024, n_heads=2, n_blocks=4):
         super().__init__()
+        self.token_embedding = nn.Embedding(vocab_size, d_model)
+        self.positional_embedding = nn.Embedding(32, d_model)
+        self.blocks = nn.Sequential(*[Block(d_model, n_heads) for _ in range(n_blocks)])
+        self.linear = nn.Linear(d_model, vocab_size)
+        self.device = device
 
-        pass
+    def forward(self, x):
+        token = self.token_embedding(x)
+        position = self.positional_embedding(torch.arange(x.shape[1], device=self.device))
+        x = token + position
+        x = self.blocks(x)
+        x = self.linear(x)
+        return x
 
+class Block(nn.Module):
+    def __init__(self, d_model, heads):
+        super().__init__()
+        self.heads = nn.MultiheadAttention(d_model, heads)
+        self.norm = RMSNorm(d_model)
+
+    def forward(self, x):
+        x = self.heads(x) + x
+        x = self.norm(x)
+
+        return x
 
 ################################################################################
 # 6. K-Means Monosemantic (DISABLED by default)
@@ -554,13 +576,14 @@ def main():
         hidden_size=embed_size
     ).to(device)
 
-    transformer = TransformerModel(
+    kv_transformer = TransformerModel(
+        device=device
     ).to(device)
 
     models = {
-      "kgram_mlp_seq": kgram_model,
+      #"kgram_mlp_seq": kgram_model,
       #   "lstm_seq": lstm_model,
-      # "kvcache_transformer": kv_transformer,
+        "kvcache_transformer": kv_transformer,
     }
 
 
