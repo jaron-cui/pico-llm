@@ -526,6 +526,8 @@ def train_one_model(model,
                 break
 
         avg_loss = total_loss / step_in_epoch
+        torch.save(model, 'model.pth')
+
         print(f"[{model_name}] *** End of Epoch {epoch} *** Avg Loss: {avg_loss:.4f}")
 
 
@@ -627,20 +629,21 @@ def main():
     ############################################################################
     # Models
     ############################################################################
-    kgram_model = KGramMLPSeqModel(
-        vocab_size=vocab_size,
-        k=k,
-        embed_size=embed_size,
-        num_inner_layers=num_inner_layers,
-        chunk_size=chunk_size
-    ).to(device)
+    torch.cuda.empty_cache()
+    # kgram_model = KGramMLPSeqModel(
+    #     vocab_size=vocab_size,
+    #     k=k,
+    #     embed_size=embed_size,
+    #     num_inner_layers=num_inner_layers,
+    #     chunk_size=chunk_size
+    # ).to(device)
 
-    lstm_model = LSTMSeqModel(
-        vocab_size=vocab_size,
-        embed_size=embed_size,
-        hidden_size=embed_size
-    ).to(device)
-
+    # lstm_model = LSTMSeqModel(
+    #     vocab_size=vocab_size,
+    #     embed_size=embed_size,
+    #     hidden_size=embed_size
+    # ).to(device)
+    
     kv_transformer = TransformerModel(
         device=device
     ).to(device)
