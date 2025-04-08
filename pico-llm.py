@@ -238,7 +238,7 @@ class LSTMSeqModel(nn.Module):
 #    Very slow Python loop for training. Multi-head sums head outputs.
 ################################################################################
 dropout = 0.2
-block_size = 256 # what is the maximum context length for predictions?
+context_size = 256 # what is the maximum context length for predictions?
 if torch.cuda.is_available():
     device = torch.device("cuda")
     print("CUDA device available, using it.")
@@ -259,13 +259,13 @@ class RMSNorm(nn.Module):
         return self.weight * (x / norm)
 
 class TransformerModel(nn.Module):
-    def __init__(self, device, vocab_size=50257, d_model=1024, n_heads=2, n_blocks=4):
+    def __init__(self, device, vocab_size=50257, embed_dim=256, n_heads=2, n_blocks=4):
         super().__init__()
-        self.token_embedding = nn.Embedding(vocab_size, d_model)
-        self.positional_embedding = nn.Embedding(32, d_model)
-        self.blocks = nn.Sequential(*[Block(d_model, n_heads) for _ in range(n_blocks)])
-        self.lnorm = nn.LayerNorm(d_model)
-        self.linear = nn.Linear(d_model, vocab_size)
+        self.token_embedding = nn.Embedding(vocab_size, embed_dim)
+        self.positional_embedding = nn.Embedding(context_size, embed_dim)
+        self.blocks = nn.Sequential(*[Block(embed_dim, n_heads) for _ in range(n_blocks)])
+        self.lnorm = nn.LayerNorm(embed_dim)
+        self.linear = nn.Linear(embed_dim, vocab_size)
         self.device = device
 
     def forward(self, x):
@@ -283,7 +283,7 @@ class Head(nn.Module):
     self.key = nn.Linear(embed_dim, head_size, bias=False)
     self.query = nn.Linear(embed_dim, head_size, bias=False)
     self.value = nn.Linear(embed_dim, head_size, bias=False)
-    self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+    self.register_buffer('tril', torch.tril(torch.ones(context_size, context_size)))
     self.dropout = nn.Dropout(dropout)
 
   def forward(self, x: torch.Tensor):
