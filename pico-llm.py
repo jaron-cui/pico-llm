@@ -237,6 +237,17 @@ class LSTMSeqModel(nn.Module):
 # 5. Our "stub" Transformer with KV-cache 
 #    Very slow Python loop for training. Multi-head sums head outputs.
 ################################################################################
+dropout = 0.2
+block_size = 256 # what is the maximum context length for predictions?
+if torch.cuda.is_available():
+    device = torch.device("cuda")
+    print("CUDA device available, using it.")
+elif torch.backends.mps.is_available():
+    device = torch.device("mps")
+    print("MPS device available, using it.")
+else:
+    device = torch.device("cpu")
+    print("CPU device is being used")
 
 class RMSNorm(nn.Module):
     def __init__(self, dim, eps=1e-5):
@@ -253,6 +264,7 @@ class TransformerModel(nn.Module):
         self.token_embedding = nn.Embedding(vocab_size, d_model)
         self.positional_embedding = nn.Embedding(32, d_model)
         self.blocks = nn.Sequential(*[Block(d_model, n_heads) for _ in range(n_blocks)])
+        self.lnorm = nn.LayerNorm(d_model)
         self.linear = nn.Linear(d_model, vocab_size)
         self.device = device
 
@@ -264,17 +276,70 @@ class TransformerModel(nn.Module):
         x = self.linear(x)
         return x
 
+class Head(nn.Module):
+  def __init__(self, embed_dim: int, head_size: int):
+    super().__init__()
+    self.head_size = head_size
+    self.key = nn.Linear(embed_dim, head_size, bias=False)
+    self.query = nn.Linear(embed_dim, head_size, bias=False)
+    self.value = nn.Linear(embed_dim, head_size, bias=False)
+    self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+    self.dropout = nn.Dropout(dropout)
+
+  def forward(self, x: torch.Tensor):
+    b, t, c = x.shape
+
+    key = self.key(x)
+    query = self.query(x)
+    value = self.value(x)
+
+    # divide by square root of head size to maintain variance
+    wei = query @ key.transpose(1, 2) * self.head_size**-0.5
+    wei = wei.masked_fill(self.tril[:t, :t] == 0, float('-inf'))
+    wei = torch.softmax(wei, dim=-1)
+    wei = self.dropout(wei)
+
+    return wei @ value
+
+class MultiHeadAttention(nn.Module):
+  def __init__(self, num_heads: int, head_size: int, embed_dim: int):
+    super().__init__()
+    self.heads = nn.ModuleList([Head(embed_dim, embed_dim // num_heads) for _ in range(num_heads)])
+    self.proj = nn.Linear(embed_dim, embed_dim)
+    self.dropout = nn.Dropout(dropout)
+
+  def forward(self, x: torch.Tensor):
+    out = torch.cat([h(x) for h in self.heads], dim=-1)
+    out = self.dropout(self.proj(out))
+    return out
+
+
+class FeedForward(nn.Module):
+  def __init__(self, embed_dim: int):
+    super().__init__()
+    self.layers = nn.Sequential(
+      nn.Linear(embed_dim, 4 * embed_dim),
+      nn.ReLU(),
+      nn.Linear(4 * embed_dim, embed_dim),
+      nn.Dropout(dropout)
+    )
+
+  def forward(self, x: torch.Tensor):
+    return self.layers(x)
+
+
 class Block(nn.Module):
-    def __init__(self, d_model, heads):
-        super().__init__()
-        self.heads = nn.MultiheadAttention(d_model, heads)
-        self.norm = RMSNorm(d_model)
+  def __init__(self, embed_dim: int, heads: int):
+    super().__init__()
+    self.sa = MultiHeadAttention(heads, embed_dim // heads, embed_dim)
+    self.ffwd = FeedForward(embed_dim)
+    self.ln1 = nn.LayerNorm(embed_dim)
+    self.ln2 = nn.LayerNorm(embed_dim)
 
-    def forward(self, x):
-        x = self.heads(x) + x
-        x = self.norm(x)
-
-        return x
+  def forward(self, x: torch.Tensor):
+    x = self.sa(self.ln1(x)) + x
+    x = self.ffwd(self.ln2(x)) + x
+    return x
 
 ################################################################################
 # 6. K-Means Monosemantic (DISABLED by default)
@@ -489,14 +554,14 @@ def main():
     num_inner_layers = args.num_inner_mlp_layers
 
     # NEW: pick device from args.device_id, fallback to cpu if needed
-    requested_device_id = args.device_id
-    if requested_device_id.startswith("cuda") and not torch.cuda.is_available():
-        print(f"Requested device '{requested_device_id}' but CUDA not available. Falling back to CPU.")
-        device = torch.device("cpu")
-    else:
-        device = torch.device(requested_device_id)
+    # requested_device_id = args.device_id
+    # if requested_device_id.startswith("cuda") and not torch.cuda.is_available():
+    #     print(f"Requested device '{requested_device_id}' but CUDA not available. Falling back to CPU.")
+    #     device = torch.device("cpu")
+    # else:
+    #     device = torch.device(requested_device_id)
 
-    print(f"Using device: {device}, block_size={block_size}, kgram_k={k}, chunk_size={chunk_size}, embed_size={embed_size}")
+    print(f"Using block_size={block_size}, kgram_k={k}, chunk_size={chunk_size}, embed_size={embed_size}")
 
     ############################################################################
     # Data
