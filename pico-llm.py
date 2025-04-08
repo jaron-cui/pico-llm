@@ -359,8 +359,8 @@ def nucleus_sampling(logits: torch.Tensor, p=0.95):
     ranked_token_indices = dist.argsort()
     cutoff_index, total_probability = 0, 0.0
     while total_probability < p:
-        cutoff_index += 1
         total_probability += dist[ranked_token_indices[cutoff_index]]
+        cutoff_index += 1
 
     truncated_indices = ranked_token_indices[:cutoff_index]
     truncated_logits = logits[truncated_indices]
