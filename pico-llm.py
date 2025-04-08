@@ -356,11 +356,10 @@ def monosemantic_analysis_for_token(token_id, model, enc, device="cpu", top_n=5)
 
 def nucleus_sampling(logits: torch.Tensor, p=0.95):
     dist = logits.softmax(dim=-1)
-    ranked_token_indices = dist.argsort()
-    cutoff_index, total_probability = 0, 0.0
-    while total_probability < p:
-        total_probability += dist[ranked_token_indices[cutoff_index]]
-        cutoff_index += 1
+    ranked_token_indices = dist.argsort(descending=True)
+
+    cum_sum = torch.cumsum(dist[ranked_token_indices], dim=-1)
+    cutoff_index = torch.searchsorted(cum_sum, p)
 
     truncated_indices = ranked_token_indices[:cutoff_index]
     truncated_logits = logits[truncated_indices]
