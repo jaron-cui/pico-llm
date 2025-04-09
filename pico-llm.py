@@ -185,21 +185,15 @@ class KGramMLPSeqModel(nn.Module):
             end = min(start + self.chunk_size, seq_len)
             block_outputs = []
             for t in range(start, end):
-                batch_logits = []
-                for b in range(batch_size):
-                    if t < self.k:
-                        needed = self.k - t
-                        padding = torch.zeros(needed, device=tokens_seq.get_device())
-                        context_ids = torch.cat([padding, tokens_seq[:t, b]], dim=0)
-                    else:
-                        context_ids = tokens_seq[t-self.k:t, b]
+                padding = torch.zeros((max(0, self.k - t), batch_size), device=tokens_seq.get_device())
+                context_ids = tokens_seq[max(0, t - self.k):t]
+                context_ids = torch.cat([padding, context_ids], dim=0)
 
-                    context_embedding = torch.cat([
-                        embed(context_id) for embed, context_id in zip(self.embeddings, context_ids.int())
-                    ], dim=0).unsqueeze(0)
-                    logits_b = self.net(context_embedding)  # (1, vocab_size)
-                    batch_logits.append(logits_b)
-                block_outputs.append(torch.cat(batch_logits, dim=0).unsqueeze(0))  # (1, batch, vocab_size)
+                context_embedding = torch.cat([
+                    embed(context_id) for embed, context_id in zip(self.embeddings, context_ids.int())
+                ], dim=1)
+                logits_b = self.net(context_embedding)  # (1, vocab_size)
+                block_outputs.append(logits_b.unsqueeze(0))  # (1, batch, vocab_size)
 
             block_outputs = torch.cat(block_outputs, dim=0)  # (chunk_size, batch, vocab_size)
             outputs.append(block_outputs)
