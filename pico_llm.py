@@ -626,27 +626,27 @@ def main():
     # Models
     ############################################################################
     torch.cuda.empty_cache()
-    kgram_model = KGramMLPSeqModel(
-        vocab_size=vocab_size,
-        k=k,
-        embed_size=embed_size,
-        num_inner_layers=num_inner_layers,
-        chunk_size=chunk_size
-    ).to(device)
-
-    # lstm_model = LSTMSeqModel(
+    # kgram_model = KGramMLPSeqModel(
     #     vocab_size=vocab_size,
+    #     k=k,
     #     embed_size=embed_size,
-    #     hidden_size=embed_size
+    #     num_inner_layers=num_inner_layers,
+    #     chunk_size=chunk_size
     # ).to(device)
+
+    lstm_model = LSTMSeqModel(
+        vocab_size=vocab_size,
+        embed_size=embed_size,
+        hidden_size=embed_size
+    ).to(device)
     #
     # kv_transformer = TransformerModel(
     #     device=device
     # ).to(device)
 
     models = {
-      "kgram_mlp_seq": kgram_model,
-        # "lstm_seq": lstm_model,
+      # "kgram_mlp_seq": kgram_model,
+        "lstm_seq": lstm_model,
         # "kvcache_transformer": kv_transformer,
     }
 
