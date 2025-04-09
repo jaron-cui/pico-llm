@@ -38,7 +38,7 @@ def parse_args():
     # Additional hyperparams to mitigate slow k-gram
     parser.add_argument("--kgram_k", type=int, default=3,
                         help="Sliding window size for k-gram MLP. Smaller can reduce memory usage. Default=3.")
-    parser.add_argument("--kgram_chunk_size", type=int, default=1,
+    parser.add_argument("--kgram_chunk_size", type=int, default=32,
                         help="Process k-gram timesteps in micro-batches. Default=1.")
 
     parser.add_argument("--block_size", type=int, default=1024,
@@ -183,19 +183,17 @@ class KGramMLPSeqModel(nn.Module):
         start = 0
         while start < seq_len:
             end = min(start + self.chunk_size, seq_len)
-            block_outputs = []
-            for t in range(start, end):
+            context_embeddings = torch.zeros((end - start, batch_size, self.embed_size * 3), device=tokens_seq.get_device())
+            for i, t in enumerate(range(start, end)):
                 padding = torch.zeros((max(0, self.k - t), batch_size), device=tokens_seq.get_device())
                 context_ids = tokens_seq[max(0, t - self.k):t]
-                context_ids = torch.cat([padding, context_ids], dim=0)
+                context_ids = torch.cat([padding, context_ids], dim=0)  # (k, batch)
 
                 context_embedding = torch.cat([
-                    embed(context_id) for embed, context_id in zip(self.embeddings, context_ids.int())
-                ], dim=1)
-                logits_b = self.net(context_embedding)  # (1, vocab_size)
-                block_outputs.append(logits_b.unsqueeze(0))  # (1, batch, vocab_size)
-
-            block_outputs = torch.cat(block_outputs, dim=0)  # (chunk_size, batch, vocab_size)
+                    embed(context_id) for embed, context_id in zip(self.embeddings, context_ids.int())  # (batch)
+                ], dim=1)  # (batch, k * embed_dim)
+                context_embeddings[i] = context_embedding
+            block_outputs = self.net(context_embeddings)  # (chunk_size, batch, vocab_size)
             outputs.append(block_outputs)
             start = end
 
@@ -458,7 +456,6 @@ def train_one_model(model,
 
         step_in_epoch = 0
         for batch_idx, batch_tokens in enumerate(loader, start=1):
-            print('Iter', batch_idx, time.time())
             step_in_epoch += 1
             global_step += 1
 
