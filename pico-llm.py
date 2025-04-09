@@ -3,6 +3,9 @@ import argparse
 import time
 import random
 import math
+import numpy as np
+import typing
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -35,7 +38,7 @@ def parse_args():
     # Additional hyperparams to mitigate slow k-gram
     parser.add_argument("--kgram_k", type=int, default=3,
                         help="Sliding window size for k-gram MLP. Smaller can reduce memory usage. Default=3.")
-    parser.add_argument("--kgram_chunk_size", type=int, default=1,
+    parser.add_argument("--kgram_chunk_size", type=int, default=32,
                         help="Process k-gram timesteps in micro-batches. Default=1.")
 
     parser.add_argument("--block_size", type=int, default=1024,
@@ -160,8 +163,9 @@ class KGramMLPSeqModel(nn.Module):
         self.num_inner_layers = num_inner_layers
         self.chunk_size = chunk_size
 
+        self.embeddings = nn.ModuleList([nn.Embedding(vocab_size, embed_size) for _ in range(k)])
         self.net = nn.Sequential(
-            nn.Linear(k * vocab_size, embed_size),
+            nn.Linear(k * embed_size, embed_size),
             nn.ReLU(),
             *[nn.Sequential(nn.Linear(embed_size, embed_size), nn.ReLU()) for _ in range(num_inner_layers)],
             nn.Linear(embed_size, vocab_size)
@@ -179,26 +183,17 @@ class KGramMLPSeqModel(nn.Module):
         start = 0
         while start < seq_len:
             end = min(start + self.chunk_size, seq_len)
-            block_outputs = []
-            for t in range(start, end):
-                batch_logits = []
-                for b in range(batch_size):
-                    if t < self.k:
-                        needed = self.k - t
-                        context_ids = [0]*needed + tokens_seq[:t, b].tolist()
-                    else:
-                        context_ids = tokens_seq[t-self.k:t, b].tolist()
+            context_embeddings = torch.zeros((end - start, batch_size, self.embed_size * 3), device=tokens_seq.get_device())
+            for i, t in enumerate(range(start, end)):
+                padding = torch.zeros((max(0, self.k - t), batch_size), device=tokens_seq.get_device())
+                context_ids = tokens_seq[max(0, t - self.k):t]
+                context_ids = torch.cat([padding, context_ids], dim=0)  # (k, batch)
 
-                    context_oh = F.one_hot(
-                        torch.tensor(context_ids, dtype=torch.long, device=tokens_seq.device),
-                        num_classes=self.vocab_size
-                    )
-                    context_flat = context_oh.flatten().float().unsqueeze(0)
-                    logits_b = self.net(context_flat)  # (1, vocab_size)
-                    batch_logits.append(logits_b)
-                block_outputs.append(torch.cat(batch_logits, dim=0).unsqueeze(0))  # (1, batch, vocab_size)
-
-            block_outputs = torch.cat(block_outputs, dim=0)  # (chunk_size, batch, vocab_size)
+                context_embedding = torch.cat([
+                    embed(context_id) for embed, context_id in zip(self.embeddings, context_ids.int())  # (batch)
+                ], dim=1)  # (batch, k * embed_dim)
+                context_embeddings[i] = context_embedding
+            block_outputs = self.net(context_embeddings)  # (chunk_size, batch, vocab_size)
             outputs.append(block_outputs)
             start = end
 
@@ -361,7 +356,7 @@ def nucleus_sampling(logits: torch.Tensor, p=0.95):
     cum_sum = torch.cumsum(dist[ranked_token_indices], dim=-1)
     cutoff_index = torch.searchsorted(cum_sum, p)
 
-    truncated_indices = ranked_token_indices[:cutoff_index]
+    truncated_indices = ranked_token_indices[:cutoff_index + 1]
     truncated_logits = logits[truncated_indices]
     truncated_dist = truncated_logits.softmax(dim=-1)
 
@@ -442,7 +437,7 @@ def train_one_model(model,
                     max_steps_per_epoch=None,
                     enc=None,
                     monosemantic_info=None,
-                    prompt="Once upon a"):
+                    prompt="Once upon a") -> typing.List[float]:
     """
     We add `prompt` as an explicit argument so we can pass it down from main().
     """
@@ -452,6 +447,7 @@ def train_one_model(model,
     next_sample_time = start_time
     global_step = 0
 
+    losses = []
     for epoch in range(1, epochs + 1):
         model.train()
         total_loss = 0.0
@@ -475,6 +471,7 @@ def train_one_model(model,
             total_loss += loss.item()
             partial_loss += loss.item()
             partial_count += 1
+            losses.append(loss.item())
 
             if batch_idx % log_steps == 0:
                 avg_part_loss = partial_loss / partial_count
@@ -485,7 +482,7 @@ def train_one_model(model,
                 partial_count = 0
 
             current_time = time.time()
-            if current_time >= next_sample_time and enc is not None:
+            if current_time >= next_sample_time and enc is not None and False:
                 with torch.no_grad():
                     print(f"\n[{model_name}] Generating sample text (greedy) at epoch={epoch}, step={batch_idx}...")
                     text_greedy, ann_greedy = generate_text(
@@ -525,10 +522,10 @@ def train_one_model(model,
                 break
 
         avg_loss = total_loss / step_in_epoch
-        torch.save(model, 'model.pth')
+        torch.save(model, 'weights/lstm_model.pth')
 
         print(f"[{model_name}] *** End of Epoch {epoch} *** Avg Loss: {avg_loss:.4f}")
-
+    return losses
 
 ################################################################################
 # 9. Main
@@ -629,28 +626,28 @@ def main():
     # Models
     ############################################################################
     torch.cuda.empty_cache()
-    # kgram_model = KGramMLPSeqModel(
-    #     vocab_size=vocab_size,
-    #     k=k,
-    #     embed_size=embed_size,
-    #     num_inner_layers=num_inner_layers,
-    #     chunk_size=chunk_size
-    # ).to(device)
+    kgram_model = KGramMLPSeqModel(
+        vocab_size=vocab_size,
+        k=k,
+        embed_size=embed_size,
+        num_inner_layers=num_inner_layers,
+        chunk_size=chunk_size
+    ).to(device)
 
     # lstm_model = LSTMSeqModel(
     #     vocab_size=vocab_size,
     #     embed_size=embed_size,
     #     hidden_size=embed_size
     # ).to(device)
-    
-    kv_transformer = TransformerModel(
-        device=device
-    ).to(device)
+    #
+    # kv_transformer = TransformerModel(
+    #     device=device
+    # ).to(device)
 
     models = {
-      #"kgram_mlp_seq": kgram_model,
-      #   "lstm_seq": lstm_model,
-        "kvcache_transformer": kv_transformer,
+      "kgram_mlp_seq": kgram_model,
+        # "lstm_seq": lstm_model,
+        # "kvcache_transformer": kv_transformer,
     }
 
 
@@ -659,7 +656,7 @@ def main():
     ############################################################################
     for model_name, model in models.items():
         print(f"\n=== Training model: {model_name} ===")
-        train_one_model(
+        losses = train_one_model(
             model=model,
             loader=train_loader,
             epochs=num_epochs,
@@ -672,7 +669,7 @@ def main():
             enc=enc,
             prompt=args.prompt  # <--- Pass the user-specified prompt here
         )
-
+        np.save('weights/lstm_losses.npy', np.array(losses))
         # Final generation from the user-provided prompt (args.prompt).
         with torch.no_grad():
             # 1) Greedy
