@@ -1,6 +1,6 @@
 from typing import List
-
 from pico_llm import *
+
 
 def main():
     embed_size = 1024
@@ -22,15 +22,17 @@ def main():
     #     hidden_size=embed_size
     # ).to(device)
     # #
-    # kv_transformer = TransformerModel(
+    # kv_transformer = TransformerModelNoPos(
     #     device=device
     # ).to(device)
-    lstm_model = torch.load('weights/lstm_model.pth', weights_only=False).to(device)
-    kgram_model = torch.load('weights/kgram_model.pth', weights_only=False).to(device)
+    # lstm_model = torch.load('weights/lstm_model.pth', weights_only=False).to(device)
+    # kgram_model = torch.load('weights/kgram_model.pth', weights_only=False).to(device)
+    
+    kv_transformer = torch.load('rel_plus_abs_pos_transformer.pth', weights_only=False).to(device)
     models = {
-        'lstm': lstm_model,
-        'kgram': kgram_model,
-        # 'transformer': kv_transformer
+        # 'lstm': lstm_model,
+        # 'kgram': kgram_model,
+        'transformer': kv_transformer
     }
     sampling_modes = {
         'greedy': lambda model, prompt, tokens: generate_text(
@@ -102,7 +104,7 @@ def main():
     while True:
         if handle_command(command.split(' ')):
             break
-        command = input(f'({model_name}) >')
+        command = input(f'({model_name}) > ')
 
 
 if __name__ == '__main__':

@@ -243,7 +243,7 @@ elif torch.backends.mps.is_available():
 else:
     device = torch.device("cpu")
     print("CPU device is being used")
-
+# NO POS
 class RMSNorm(nn.Module):
     def __init__(self, dim, eps=1e-5):
         super().__init__()
@@ -253,7 +253,40 @@ class RMSNorm(nn.Module):
         norm = x.pow(2).mean(dim=-1, keepdim=True).add(self.eps).sqrt()
         return self.weight * (x / norm)
 
-class TransformerModel(nn.Module):
+class TransformerModelAbsRelPos(nn.Module):
+    def __init__(self, device, vocab_size=50257, embed_dim=256, n_heads=2, n_blocks=4):
+        super().__init__()
+        self.token_embedding = nn.Embedding(vocab_size, embed_dim)
+        self.positional_embedding = nn.Embedding(context_size, embed_dim)
+        self.blocks = nn.Sequential(*[BlockRelPos(embed_dim, n_heads) for _ in range(n_blocks)])
+        self.lnorm = nn.LayerNorm(embed_dim)
+        self.linear = nn.Linear(embed_dim, vocab_size)
+        self.device = device
+
+    def forward(self, x):
+        token = self.token_embedding(x)
+        position = self.positional_embedding(torch.arange(x.shape[1], device=self.device))
+        x = token + position
+        x = self.blocks(x)
+        x = self.linear(x)
+        return x
+
+class TransformerModelRelPos(nn.Module):
+    def __init__(self, device, vocab_size=50257, embed_dim=256, n_heads=2, n_blocks=4):
+        super().__init__()
+        self.token_embedding = nn.Embedding(vocab_size, embed_dim)
+        self.blocks = nn.Sequential(*[BlockRelPos(embed_dim, n_heads) for _ in range(n_blocks)])
+        self.lnorm = nn.LayerNorm(embed_dim)
+        self.linear = nn.Linear(embed_dim, vocab_size)
+        self.device = device
+
+    def forward(self, x):
+        x = self.token_embedding(x)
+        x = self.blocks(x)
+        x = self.linear(x)
+        return x
+
+class TransformerModelAbsPos(nn.Module):
     def __init__(self, device, vocab_size=50257, embed_dim=256, n_heads=2, n_blocks=4):
         super().__init__()
         self.token_embedding = nn.Embedding(vocab_size, embed_dim)
@@ -267,6 +300,21 @@ class TransformerModel(nn.Module):
         token = self.token_embedding(x)
         position = self.positional_embedding(torch.arange(x.shape[1], device=self.device))
         x = token + position
+        x = self.blocks(x)
+        x = self.linear(x)
+        return x
+
+class TransformerModelNoPos(nn.Module):
+    def __init__(self, device, vocab_size=50257, embed_dim=256, n_heads=2, n_blocks=4):
+        super().__init__()
+        self.token_embedding = nn.Embedding(vocab_size, embed_dim)
+        self.blocks = nn.Sequential(*[Block(embed_dim, n_heads) for _ in range(n_blocks)])
+        self.lnorm = nn.LayerNorm(embed_dim)
+        self.linear = nn.Linear(embed_dim, vocab_size)
+        self.device = device
+
+    def forward(self, x):
+        x = self.token_embedding(x)
         x = self.blocks(x)
         x = self.linear(x)
         return x
@@ -296,6 +344,45 @@ class Head(nn.Module):
 
     return wei @ value
 
+class HeadRelPos(nn.Module):
+  def __init__(self, embed_dim: int, head_size: int):
+    super().__init__()
+    self.head_size = head_size
+    self.key = nn.Linear(embed_dim, head_size, bias=False)
+    self.query = nn.Linear(embed_dim, head_size, bias=False)
+    self.value = nn.Linear(embed_dim, head_size, bias=False)
+    self.dropout = nn.Dropout(dropout)
+
+    self.max_pos = context_size
+    self.rel_pos_emb = nn.Embedding(2 * self.max_pos - 1, head_size)
+
+  def forward(self, x: torch.Tensor):
+    b, t, c = x.shape
+
+    key = self.key(x)      # (b, t, hs)
+    query = self.query(x)  # (b, t, hs)
+    value = self.value(x)  # (b, t, hs)
+
+    scores = query @ key.transpose(1, 2) * self.head_size**-0.5  # (b, t, t)
+
+    # Compute relative position matrix
+    pos = torch.arange(t, device=x.device)
+    rel = pos[None, :] - pos[:, None]  # shape: (t, t), values in [-t+1, t-1]
+    rel += self.max_pos - 1  # shift to [0, 2t - 2] for embedding
+    rel_bias = self.rel_pos_emb(rel)  # (t, t, head_size)
+
+    scores += rel_bias.permute(2, 0, 1).mean(0)  # Average across head dim → (t, t)
+
+    # Apply causal mask
+    mask = torch.tril(torch.ones(t, t, device=x.device))
+    scores = scores.masked_fill(mask == 0, float('-inf'))
+
+    attn = F.softmax(scores, dim=-1)
+    attn = self.dropout(attn)
+
+    out = attn @ value  # (b, t, hs)
+    return out
+
 class MultiHeadAttention(nn.Module):
   def __init__(self, num_heads: int, head_size: int, embed_dim: int):
     super().__init__()
@@ -308,6 +395,17 @@ class MultiHeadAttention(nn.Module):
     out = self.dropout(self.proj(out))
     return out
 
+class MultiHeadAttentionRelPos(nn.Module):
+  def __init__(self, num_heads: int, head_size: int, embed_dim: int):
+    super().__init__()
+    self.heads = nn.ModuleList([HeadRelPos(embed_dim, embed_dim // num_heads) for _ in range(num_heads)])
+    self.proj = nn.Linear(embed_dim, embed_dim)
+    self.dropout = nn.Dropout(dropout)
+
+  def forward(self, x: torch.Tensor):
+    out = torch.cat([h(x) for h in self.heads], dim=-1)
+    out = self.dropout(self.proj(out))
+    return out
 
 class FeedForward(nn.Module):
   def __init__(self, embed_dim: int):
@@ -335,6 +433,20 @@ class Block(nn.Module):
     x = self.sa(self.ln1(x)) + x
     x = self.ffwd(self.ln2(x)) + x
     return x
+  
+class BlockRelPos(nn.Module):
+  def __init__(self, embed_dim: int, heads: int):
+    super().__init__()
+    self.sa = MultiHeadAttentionRelPos(heads, embed_dim // heads, embed_dim)
+    self.ffwd = FeedForward(embed_dim)
+    self.ln1 = nn.LayerNorm(embed_dim)
+    self.ln2 = nn.LayerNorm(embed_dim)
+
+  def forward(self, x: torch.Tensor):
+    x = self.sa(self.ln1(x)) + x
+    x = self.ffwd(self.ln2(x)) + x
+    return x
+
 
 ################################################################################
 # 6. K-Means Monosemantic (DISABLED by default)
